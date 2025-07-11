@@ -147,6 +147,8 @@ class LearningPlatformTester:
         except Exception as e:
             self.log_test("Get Current User", False, f"Error: {str(e)}")
             return False
+
+    def test_health_check(self):
         """Test the API health check endpoint"""
         try:
             response = self.session.get(f"{self.base_url}/")
