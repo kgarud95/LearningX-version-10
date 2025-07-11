@@ -13,7 +13,7 @@ import uuid
 import os
 
 # Backend URL from environment - use the public endpoint
-BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:8001') + '/api'
+BACKEND_URL = "http://localhost:8001/api"
 
 class LearningPlatformTester:
     def __init__(self):
