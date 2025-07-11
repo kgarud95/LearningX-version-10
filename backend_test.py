@@ -554,6 +554,8 @@ class LearningPlatformTester:
         # Test sequence
         tests = [
             ("Health Check", self.test_health_check),
+            ("User Registration/Login", self.test_register_user),
+            ("Get Current User", self.test_get_current_user),
             ("Course Creation", self.test_create_course),
             ("Get All Courses", self.test_get_courses),
             ("Get Course by ID", self.test_get_course_by_id),
