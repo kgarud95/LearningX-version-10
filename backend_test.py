@@ -43,7 +43,110 @@ class LearningPlatformTester:
             print(f"    Response: {response_data}")
         print()
 
-    def test_health_check(self):
+    def test_register_user(self):
+        """Test user registration"""
+        try:
+            # Create test user data
+            test_user = {
+                "email": "test@example.com",
+                "password": "password123",
+                "name": "Test User"
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}/auth/register",
+                json=test_user,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "access_token" in data and "user" in data:
+                    self.auth_token = data["access_token"]
+                    self.test_user_data = data["user"]
+                    self.session.headers.update({"Authorization": f"Bearer {self.auth_token}"})
+                    self.log_test(
+                        "User Registration", 
+                        True, 
+                        f"User registered: {data['user']['email']}"
+                    )
+                    return True
+                else:
+                    self.log_test("User Registration", False, "Invalid response format", data)
+                    return False
+            elif response.status_code == 400:
+                # User might already exist, try login instead
+                return self.test_login_user()
+            else:
+                self.log_test("User Registration", False, f"HTTP {response.status_code}", response.text)
+                return False
+        except Exception as e:
+            self.log_test("User Registration", False, f"Error: {str(e)}")
+            return False
+
+    def test_login_user(self):
+        """Test user login"""
+        try:
+            login_data = {
+                "email": "test@example.com",
+                "password": "password123"
+            }
+            
+            response = self.session.post(
+                f"{self.base_url}/auth/login",
+                json=login_data,
+                headers={"Content-Type": "application/json"}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "access_token" in data and "user" in data:
+                    self.auth_token = data["access_token"]
+                    self.test_user_data = data["user"]
+                    self.session.headers.update({"Authorization": f"Bearer {self.auth_token}"})
+                    self.log_test(
+                        "User Login", 
+                        True, 
+                        f"User logged in: {data['user']['email']}"
+                    )
+                    return True
+                else:
+                    self.log_test("User Login", False, "Invalid response format", data)
+                    return False
+            else:
+                self.log_test("User Login", False, f"HTTP {response.status_code}", response.text)
+                return False
+        except Exception as e:
+            self.log_test("User Login", False, f"Error: {str(e)}")
+            return False
+
+    def test_get_current_user(self):
+        """Test getting current user info"""
+        if not self.auth_token:
+            self.log_test("Get Current User", False, "No auth token available")
+            return False
+            
+        try:
+            response = self.session.get(f"{self.base_url}/auth/me")
+            
+            if response.status_code == 200:
+                data = response.json()
+                if "email" in data and data["email"] == "test@example.com":
+                    self.log_test(
+                        "Get Current User", 
+                        True, 
+                        f"Retrieved user: {data['email']}"
+                    )
+                    return True
+                else:
+                    self.log_test("Get Current User", False, "Invalid user data", data)
+                    return False
+            else:
+                self.log_test("Get Current User", False, f"HTTP {response.status_code}", response.text)
+                return False
+        except Exception as e:
+            self.log_test("Get Current User", False, f"Error: {str(e)}")
+            return False
         """Test the API health check endpoint"""
         try:
             response = self.session.get(f"{self.base_url}/")
