@@ -14,7 +14,7 @@ from enum import Enum
 import httpx
 
 # Import authentication utilities
-from .auth import (
+from auth import (
     Token, LoginCredentials, RegisterCredentials, EmergentAuthRequest, GoogleAuthRequest,
     verify_password, get_password_hash, create_access_token, verify_token, get_current_user,
     verify_emergent_session, verify_google_oauth_code, create_session, verify_session, invalidate_session
