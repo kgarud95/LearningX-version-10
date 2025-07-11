@@ -10,9 +10,10 @@ import sys
 from datetime import datetime
 from typing import Dict, Any, List
 import uuid
+import os
 
-# Backend URL from environment
-BACKEND_URL = "https://8be2e678-76ac-41b4-aa65-b67f321549af.preview.emergentagent.com/api"
+# Backend URL from environment - use the public endpoint
+BACKEND_URL = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:8001') + '/api'
 
 class LearningPlatformTester:
     def __init__(self):
