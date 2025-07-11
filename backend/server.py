@@ -526,7 +526,357 @@ async def get_user_enrollments(current_user: dict = Depends(get_current_user_dep
     
     return enrollment_responses
 
-# Progress Tracking (now with auth)
+# Import curriculum models
+from curriculum_models import (
+    LessonCreate, LessonUpdate, LessonResponse, ModuleCreate, ModuleUpdate, 
+    ModuleResponse, CourseStructure, LearningSession, ReorderRequest, BulkReorderRequest
+)
+
+# Curriculum Management - Module APIs
+@api_router.post("/courses/{course_id}/modules", response_model=ModuleResponse)
+async def create_module(course_id: str, module_data: ModuleCreate, current_user: dict = Depends(get_current_user_dependency)):
+    """Create a new module in a course"""
+    # Verify course exists and user is the instructor
+    course = await db.courses.find_one({"id": course_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    
+    if course["instructor_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the course instructor can add modules")
+    
+    # Get the next order number
+    existing_modules = course.get("modules", [])
+    next_order = len(existing_modules) + 1
+    
+    # Create module
+    module_dict = module_data.dict()
+    module_dict["id"] = str(uuid.uuid4())
+    module_dict["order"] = next_order
+    module_dict["lessons"] = []
+    module_dict["created_at"] = datetime.utcnow()
+    module_dict["updated_at"] = datetime.utcnow()
+    
+    # Add module to course
+    await db.courses.update_one(
+        {"id": course_id},
+        {"$push": {"modules": module_dict}}
+    )
+    
+    # Return response
+    response_dict = module_dict.copy()
+    response_dict["total_lessons"] = 0
+    response_dict["total_duration"] = 0
+    
+    return ModuleResponse(**response_dict)
+
+@api_router.get("/courses/{course_id}/modules", response_model=List[ModuleResponse])
+async def get_course_modules(course_id: str):
+    """Get all modules for a course"""
+    course = await db.courses.find_one({"id": course_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    
+    modules = course.get("modules", [])
+    
+    # Enrich modules with additional data
+    module_responses = []
+    for module in modules:
+        module_dict = module.copy()
+        module_dict["course_id"] = course_id
+        module_dict["total_lessons"] = len(module.get("lessons", []))
+        module_dict["total_duration"] = sum(
+            lesson.get("duration_minutes", 0) for lesson in module.get("lessons", [])
+        )
+        
+        # Convert lessons to response format
+        lessons = []
+        for lesson in module.get("lessons", []):
+            lesson_dict = lesson.copy()
+            if "created_at" not in lesson_dict:
+                lesson_dict["created_at"] = datetime.utcnow()
+            if "updated_at" not in lesson_dict:
+                lesson_dict["updated_at"] = datetime.utcnow()
+            lessons.append(LessonResponse(**lesson_dict))
+        
+        module_dict["lessons"] = lessons
+        module_responses.append(ModuleResponse(**module_dict))
+    
+    return module_responses
+
+@api_router.put("/modules/{module_id}", response_model=ModuleResponse)
+async def update_module(module_id: str, module_data: ModuleUpdate, current_user: dict = Depends(get_current_user_dependency)):
+    """Update a module"""
+    # Find course containing the module
+    course = await db.courses.find_one({"modules.id": module_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Module not found")
+    
+    if course["instructor_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the course instructor can update modules")
+    
+    # Update module in course
+    update_data = {f"modules.$.{k}": v for k, v in module_data.dict(exclude_unset=True).items()}
+    update_data["modules.$.updated_at"] = datetime.utcnow()
+    
+    await db.courses.update_one(
+        {"id": course["id"], "modules.id": module_id},
+        {"$set": update_data}
+    )
+    
+    # Return updated module
+    updated_course = await db.courses.find_one({"id": course["id"]})
+    updated_module = next(m for m in updated_course["modules"] if m["id"] == module_id)
+    
+    response_dict = updated_module.copy()
+    response_dict["course_id"] = course["id"]
+    response_dict["total_lessons"] = len(updated_module.get("lessons", []))
+    response_dict["total_duration"] = sum(
+        lesson.get("duration_minutes", 0) for lesson in updated_module.get("lessons", [])
+    )
+    
+    return ModuleResponse(**response_dict)
+
+@api_router.delete("/modules/{module_id}")
+async def delete_module(module_id: str, current_user: dict = Depends(get_current_user_dependency)):
+    """Delete a module"""
+    # Find course containing the module
+    course = await db.courses.find_one({"modules.id": module_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Module not found")
+    
+    if course["instructor_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the course instructor can delete modules")
+    
+    # Remove module from course
+    await db.courses.update_one(
+        {"id": course["id"]},
+        {"$pull": {"modules": {"id": module_id}}}
+    )
+    
+    # Delete associated lesson progress
+    await db.lesson_progress.delete_many({"course_id": course["id"], "lesson_id": {"$in": [lesson["id"] for lesson in course.get("modules", []) if lesson["id"] == module_id]}})
+    
+    return {"message": "Module deleted successfully"}
+
+# Lesson APIs
+@api_router.post("/modules/{module_id}/lessons", response_model=LessonResponse)
+async def create_lesson(module_id: str, lesson_data: LessonCreate, current_user: dict = Depends(get_current_user_dependency)):
+    """Create a new lesson in a module"""
+    # Find course and module
+    course = await db.courses.find_one({"modules.id": module_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Module not found")
+    
+    if course["instructor_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the course instructor can add lessons")
+    
+    # Find the specific module
+    module = next(m for m in course["modules"] if m["id"] == module_id)
+    
+    # Get the next order number
+    existing_lessons = module.get("lessons", [])
+    next_order = len(existing_lessons) + 1
+    
+    # Create lesson
+    lesson_dict = lesson_data.dict()
+    lesson_dict["id"] = str(uuid.uuid4())
+    lesson_dict["order"] = next_order
+    lesson_dict["created_at"] = datetime.utcnow()
+    lesson_dict["updated_at"] = datetime.utcnow()
+    
+    # Add lesson to module
+    await db.courses.update_one(
+        {"id": course["id"], "modules.id": module_id},
+        {"$push": {"modules.$.lessons": lesson_dict}}
+    )
+    
+    return LessonResponse(**lesson_dict)
+
+@api_router.get("/lessons/{lesson_id}", response_model=LessonResponse)
+async def get_lesson(lesson_id: str):
+    """Get a specific lesson"""
+    course = await db.courses.find_one({"modules.lessons.id": lesson_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    
+    # Find the lesson
+    for module in course["modules"]:
+        for lesson in module.get("lessons", []):
+            if lesson["id"] == lesson_id:
+                lesson_dict = lesson.copy()
+                if "created_at" not in lesson_dict:
+                    lesson_dict["created_at"] = datetime.utcnow()
+                if "updated_at" not in lesson_dict:
+                    lesson_dict["updated_at"] = datetime.utcnow()
+                return LessonResponse(**lesson_dict)
+    
+    raise HTTPException(status_code=404, detail="Lesson not found")
+
+@api_router.put("/lessons/{lesson_id}", response_model=LessonResponse)
+async def update_lesson(lesson_id: str, lesson_data: LessonUpdate, current_user: dict = Depends(get_current_user_dependency)):
+    """Update a lesson"""
+    course = await db.courses.find_one({"modules.lessons.id": lesson_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    
+    if course["instructor_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the course instructor can update lessons")
+    
+    # Update lesson in nested structure
+    update_fields = {}
+    for key, value in lesson_data.dict(exclude_unset=True).items():
+        update_fields[f"modules.$[module].lessons.$[lesson].{key}"] = value
+    
+    update_fields["modules.$[module].lessons.$[lesson].updated_at"] = datetime.utcnow()
+    
+    await db.courses.update_one(
+        {"id": course["id"]},
+        {"$set": update_fields},
+        array_filters=[
+            {"module.lessons.id": lesson_id},
+            {"lesson.id": lesson_id}
+        ]
+    )
+    
+    # Return updated lesson
+    return await get_lesson(lesson_id)
+
+@api_router.delete("/lessons/{lesson_id}")
+async def delete_lesson(lesson_id: str, current_user: dict = Depends(get_current_user_dependency)):
+    """Delete a lesson"""
+    course = await db.courses.find_one({"modules.lessons.id": lesson_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    
+    if course["instructor_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Only the course instructor can delete lessons")
+    
+    # Remove lesson from module
+    await db.courses.update_one(
+        {"id": course["id"]},
+        {"$pull": {"modules.$[].lessons": {"id": lesson_id}}}
+    )
+    
+    # Delete associated progress
+    await db.lesson_progress.delete_many({"lesson_id": lesson_id})
+    
+    return {"message": "Lesson deleted successfully"}
+
+# Course Structure and Learning APIs
+@api_router.get("/courses/{course_id}/structure", response_model=CourseStructure)
+async def get_course_structure(course_id: str, current_user: dict = Depends(get_current_user_dependency)):
+    """Get complete course structure with user progress"""
+    course = await db.courses.find_one({"id": course_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    
+    # Get user's enrollment and progress
+    enrollment = await db.enrollments.find_one({
+        "user_id": current_user["id"],
+        "course_id": course_id
+    })
+    
+    if not enrollment:
+        raise HTTPException(status_code=403, detail="You must be enrolled to access course structure")
+    
+    # Get user's lesson progress
+    user_progress = {}
+    progress_records = await db.lesson_progress.find({
+        "user_id": current_user["id"],
+        "course_id": course_id
+    }).to_list(None)
+    
+    for progress in progress_records:
+        user_progress[progress["lesson_id"]] = {
+            "completed": progress.get("completed", False),
+            "time_spent": progress.get("time_spent_minutes", 0),
+            "last_position": progress.get("last_position"),
+            "completion_date": progress.get("completion_date")
+        }
+    
+    # Get modules with lessons
+    modules = await get_course_modules(course_id)
+    
+    # Calculate totals
+    total_lessons = sum(len(module.lessons) for module in modules)
+    total_duration = sum(
+        lesson.duration_minutes or 0 
+        for module in modules 
+        for lesson in module.lessons
+    )
+    
+    return CourseStructure(
+        course=course,
+        modules=modules,
+        total_modules=len(modules),
+        total_lessons=total_lessons,
+        total_duration=total_duration,
+        user_progress=user_progress
+    )
+
+@api_router.get("/courses/{course_id}/learn", response_model=LearningSession)
+async def get_learning_session(course_id: str, lesson_id: Optional[str] = None, current_user: dict = Depends(get_current_user_dependency)):
+    """Get learning session with current lesson and navigation"""
+    course = await db.courses.find_one({"id": course_id})
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    
+    # Check enrollment
+    enrollment = await db.enrollments.find_one({
+        "user_id": current_user["id"],
+        "course_id": course_id
+    })
+    
+    if not enrollment:
+        raise HTTPException(status_code=403, detail="You must be enrolled to access this course")
+    
+    # Get user progress
+    progress_records = await db.lesson_progress.find({
+        "user_id": current_user["id"],
+        "course_id": course_id
+    }).to_list(None)
+    
+    user_progress = {p["lesson_id"]: p for p in progress_records}
+    
+    # Get all lessons in order
+    all_lessons = []
+    for module in course.get("modules", []):
+        for lesson in sorted(module.get("lessons", []), key=lambda x: x.get("order", 0)):
+            all_lessons.append(lesson)
+    
+    # Determine current lesson
+    current_lesson = None
+    if lesson_id:
+        current_lesson = next((l for l in all_lessons if l["id"] == lesson_id), None)
+    else:
+        # Find first incomplete lesson or first lesson
+        for lesson in all_lessons:
+            if lesson["id"] not in user_progress or not user_progress[lesson["id"]].get("completed", False):
+                current_lesson = lesson
+                break
+        
+        if not current_lesson and all_lessons:
+            current_lesson = all_lessons[0]
+    
+    # Find next and previous lessons
+    current_index = next((i for i, l in enumerate(all_lessons) if l["id"] == current_lesson["id"]), 0) if current_lesson else 0
+    
+    next_lesson = all_lessons[current_index + 1] if current_index + 1 < len(all_lessons) else None
+    previous_lesson = all_lessons[current_index - 1] if current_index > 0 else None
+    
+    # Convert to response format
+    next_lesson_response = LessonResponse(**next_lesson) if next_lesson else None
+    previous_lesson_response = LessonResponse(**previous_lesson) if previous_lesson else None
+    
+    return LearningSession(
+        course_id=course_id,
+        current_lesson_id=current_lesson["id"] if current_lesson else None,
+        user_progress=user_progress,
+        next_lesson=next_lesson_response,
+        previous_lesson=previous_lesson_response
+    )
+
+# Progress Tracking (enhanced)
 @api_router.post("/progress")
 async def update_progress(progress_data: ProgressUpdate, current_user: dict = Depends(get_current_user_dependency)):
     """Update lesson progress (authenticated endpoint)"""
@@ -557,8 +907,11 @@ async def update_progress(progress_data: ProgressUpdate, current_user: dict = De
         progress_dict = progress_data.dict()
         progress_dict["user_id"] = current_user["id"]
         progress_dict["course_id"] = course["id"]
+        progress_dict["id"] = str(uuid.uuid4())
         if progress_data.completed:
             progress_dict["completion_date"] = datetime.utcnow()
+        progress_dict["created_at"] = datetime.utcnow()
+        progress_dict["updated_at"] = datetime.utcnow()
         
         progress_obj = LessonProgress(**progress_dict)
         await db.lesson_progress.insert_one(progress_obj.dict())
@@ -567,6 +920,31 @@ async def update_progress(progress_data: ProgressUpdate, current_user: dict = De
     await update_course_progress(current_user["id"], course["id"])
     
     return {"message": "Progress updated successfully"}
+
+@api_router.get("/courses/{course_id}/progress")
+async def get_course_progress(course_id: str, current_user: dict = Depends(get_current_user_dependency)):
+    """Get user's progress for a specific course"""
+    # Verify enrollment
+    enrollment = await db.enrollments.find_one({
+        "user_id": current_user["id"],
+        "course_id": course_id
+    })
+    
+    if not enrollment:
+        raise HTTPException(status_code=403, detail="You must be enrolled to view progress")
+    
+    # Get progress records
+    progress_records = await db.lesson_progress.find({
+        "user_id": current_user["id"],
+        "course_id": course_id
+    }).to_list(None)
+    
+    return {
+        "course_id": course_id,
+        "overall_progress": enrollment.get("progress_percentage", 0),
+        "last_accessed": enrollment.get("last_accessed"),
+        "lesson_progress": progress_records
+    }
 
 async def update_course_progress(user_id: str, course_id: str):
     """Update overall course progress percentage"""
